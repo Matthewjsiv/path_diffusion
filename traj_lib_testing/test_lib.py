@@ -4,7 +4,10 @@ import matplotlib.pyplot as plt
 import cv2
 import time
 
-TRAJ_LIB = np.load('traj_lib.npy')[::50]
+import matplotlib.cm as cm
+cmap = cm.viridis
+
+TRAJ_LIB = np.load('traj_lib.npy')#[:,:,:2]#[::50]
 N_TRAJ = len(TRAJ_LIB)
 print(TRAJ_LIB.shape)
 # Z_APPEND = np.zeros((TRAJ_LIB.shape[0],1))
@@ -13,7 +16,7 @@ print(TRAJ_LIB.shape)
 
 def transformed_lib(pose):
 
-    lib = TRAJ_LIB.copy()
+    lib = TRAJ_LIB[:,:,:2].copy()
 
     submat = pose[:3, :3]
     yaw = -np.arctan2(submat[1, 0], submat[0, 0]) + np.pi/2
@@ -128,17 +131,25 @@ for i in range(50,length):
 
     trajs_disc = ((trajs - np.array([-30., -30]).reshape(1, 1, 2)) / res).astype(np.int32)
 
-    import pdb;pdb.set_trace()
+    # import pdb;pdb.set_trace()
 
-    print(trajs.dtype)
-    costmap[trajs_disc[:,:,0],trajs_disc[:,:,1]] = 1
+    # print(trajs.dtype)
+    # costmap[trajs_disc[:,:,0],trajs_disc[:,:,1]] = 1
+    # print(np.min(costmap), np.max(costmap))
+    costs = costmap[trajs_disc[:,:,0],trajs_disc[:,:,1]].sum(axis=1)
+    # print(costs.shape)
+    costs /= costs.max()
 
     plt.imshow(costmap,origin='lower',extent=[-30, 30, -30, 30])
     for i in range(N_TRAJ):
-        plt.plot(trajs[i,:,1],trajs[i,:,0])
+        plt.plot(trajs[i,:,1],trajs[i,:,0],c=cmap(costs[i]))
     plt.show()
 
-
+    ids = np.argsort(costs)[:100]
+    # for i in ids:
+    #     plt.plot(trajs[i,:,1],trajs[i,:,0],c=cmap(costs[i]))
+    # plt.show()
+    # costmap[trajs_disc[ids,:,0],trajs_disc[ids,:,1]] = 1
     # cv2.imshow('test',costmap)
     # cv2.waitKey(1)
 
