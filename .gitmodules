@@ -1,0 +1,3 @@
+[submodule "visualnav-transformer"]
+	path = visualnav-transformer
+	url = https://github.com/Matthewjsiv/visualnav-transformer.git
