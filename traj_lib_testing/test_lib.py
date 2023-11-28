@@ -1,18 +1,23 @@
+#torch imports
 import torch
+from torch.utils.data import Dataset
+from torchvision import datasets
+from torchvision.transforms import ToTensor
+
+#python imports
+import os
+import cv2
 import numpy as np
 import matplotlib.pyplot as plt
-import cv2
-import time
 
 import matplotlib.cm as cm
 cmap = cm.viridis
 
+TEST_LOCALLY = False
+
 TRAJ_LIB = np.load('traj_lib.npy')#[:,:,:2]#[::50]
 N_TRAJ = len(TRAJ_LIB)
 print(TRAJ_LIB.shape)
-# Z_APPEND = np.zeros((TRAJ_LIB.shape[0],1))
-
-# TRAJ_LIB = np.hstack([TRAJ_LIB, Z_APPEND])
 
 def transformed_lib(pose):
 
@@ -88,70 +93,84 @@ def quaternion_rotation_matrix(Q):
     return rot_matrix
 
 
-dataset = torch.load('context_mppi_pipe_1.pt')
-# print(dataset['observation']['state'].shape)
-# traj = dataset['observation']['state']
+class TrajLib(object):
+    def __init__(self, dataset_file, top_k, cost_threshold, num_buckets=3, visualize=False):
+        self.visualize = visualize
+        self.dataset = torch.load(dataset_file)
+        print("dataset loaded")
+        self.obs = self.dataset['observation']
+        self.cost_threshold = cost_threshold
+        self.num_buckets = num_buckets
+        self.top_k = top_k
 
-# print(dataset['observation'].keys())
+    #preprocesses data at a given time t and returns cost and trajectories
+    def preprocess_data(self, t):
+        costmap = self.obs['local_costmap_data'][t][0].numpy()
+        odom = self.obs['state'][t]
+        res = self.obs['local_costmap_resolution'][t][0].item() #assuming square
+        pose_se3 = pose_msg_to_se3(odom)
+        #THIS SHOULD EVENTUALLY REPLACED WITH A MORE PRINCIPLED WAY
+        trajs = transformed_lib(pose_se3)
+        trajs_disc = ((trajs - np.array([-30., -30]).reshape(1, 1, 2)) / res).astype(np.int32)
+        costs = costmap[trajs_disc[:,:,0],trajs_disc[:,:,1]].sum(axis=1)
+        #keep trajectories that are below a certain cost
+        idx_below_cost_thresh = np.where(costs < self.cost_threshold)[0]
+        costs = costs[idx_below_cost_thresh]
+        trajs = trajs[idx_below_cost_thresh]
+        return trajs, costs, costmap
 
-length = dataset['observation']['state'].shape[0]
-obs = dataset['observation']
-print(obs.keys())
-for i in range(50,length):
-    #NOTE: data is already reversed
-    #in general, sam already covered the preprocessing so we need to do it at runtime but not here
-    costmap = obs['local_costmap_data'][i][0]
-    odom = obs['state'][i]
+    def get_top_trajs(self, t):
+        #preprocess data
+        trajs, costs, costmap = self.preprocess_data(t)
+        #split trajs and costs into bucket
+        split_traj_lib = np.array_split(trajs, self.num_buckets, axis=0)
+        split_costs = np.array_split(costs, self.num_buckets)
+        #iterate through buckets and extract top k/num elements elements --> assume perfect division for now
+        top_k_per_bucket = self.top_k // self.num_buckets
+        best_split_trajs, best_split_costs = [], []
+        for idx in range(len(split_traj_lib)):
+            least_cost_bucket_idx = np.argsort(split_costs[idx])[:top_k_per_bucket].astype(np.int32)
+            least_cost_trajs = split_traj_lib[idx][least_cost_bucket_idx]
+            least_costs = split_costs[idx][least_cost_bucket_idx]
+            best_split_trajs.append(least_cost_trajs)
+            best_split_costs.append(least_costs)
+        
+        return np.concatenate(best_split_trajs), np.concatenate(best_split_costs), costmap
 
-    nx = obs['local_costmap_height'][i]
-    ny = obs['local_costmap_width'][i]
-    res = obs['local_costmap_resolution'][i][0].item() #assuming square
-    print(res)
-    origin = obs['local_costmap_origin']
+class TrajLibDataset(Dataset):
+    def __init__(self, dataset_file, top_k, cost_threshold, num_buckets=3):
+        self.traj_lib = TrajLib(dataset_file=dataset_file, top_k=top_k, cost_threshold=cost_threshold, num_buckets=num_buckets)
+    
+    def __len__(self):
+        return self.traj_lib.dataset['observation']['state'].shape[0]
 
-    pose_se3 = pose_msg_to_se3(odom)
+    def __getitem__(self, idx):
+        #get top trajs from trajectory library
+        best_trajs, best_costs, costmap = self.traj_lib.get_top_trajs(idx)
+        return torch.tensor(costmap), torch.tensor(best_trajs)
+    
 
-    #THIS SHOULD EVENTUALLY REPLACED WITH A MORE PRINCIPLED WAY
-    trajs = transformed_lib(pose_se3)
-    # trajs[:,:,0] += int(costmap.shape[0]/2)
-    # trajs[:,:,1] += int(costmap.shape[1]/2)
+if __name__ == "__main__":
+    if TEST_LOCALLY:
+        traj_lib = TrajLib(dataset_file='context_mppi_pipe_1.pt', top_k=30, cost_threshold=18.5, visualize=True)
+        for i in range(350,500):
+            best_trajs, best_costs, costmap = traj_lib.get_top_trajs(i)
+            #normalize for vizualization
+            costmap -= costmap.min()
+            costmap /= costmap.max()
+            best_costs /= best_costs.max()
 
-    #add origin + half length/width
-    #then world to grid
+            #plot top trajs on costmap (image per timestep)
+            plt.imshow(costmap,origin='lower',extent=[-30, 30, -30, 30])
+            for idx in range(30):
+                plt.plot(best_trajs[idx,:,1], best_trajs[idx,:,0], c=cmap(best_costs[idx]))
+            plt.show()
 
-    #for viz
-    costmap -= costmap.min()
-    costmap /= costmap.max()
-    costmap = costmap.numpy()
 
-    # trajs_disc = trajs.astype(int)
-    # trajs_disc /= res
-    # trajs_disc[:,:,0] += costmap.shape[0]/2
-    # trajs_disc[:,:,1] += costmap.shape[1]/2
+if __name__ == "__main__":
 
-    trajs_disc = ((trajs - np.array([-30., -30]).reshape(1, 1, 2)) / res).astype(np.int32)
+    traj_lib = TrajLib(dataset_file='context_mppi_pipe_1.pt', top_k=30, cost_threshold=18.5, visualize=True)
+    for i in range(350,351):
+        best_trajs, best_costs, costmap = traj_lib.get_top_trajs(i)
 
-    # import pdb;pdb.set_trace()
 
-    # print(trajs.dtype)
-    # costmap[trajs_disc[:,:,0],trajs_disc[:,:,1]] = 1
-    # print(np.min(costmap), np.max(costmap))
-    costs = costmap[trajs_disc[:,:,0],trajs_disc[:,:,1]].sum(axis=1)
-    # print(costs.shape)
-    costs /= costs.max()
-
-    plt.imshow(costmap,origin='lower',extent=[-30, 30, -30, 30])
-    for i in range(N_TRAJ):
-        plt.plot(trajs[i,:,1],trajs[i,:,0],c=cmap(costs[i]))
-    plt.show()
-
-    ids = np.argsort(costs)[:100]
-    # for i in ids:
-    #     plt.plot(trajs[i,:,1],trajs[i,:,0],c=cmap(costs[i]))
-    # plt.show()
-    # costmap[trajs_disc[ids,:,0],trajs_disc[ids,:,1]] = 1
-    # cv2.imshow('test',costmap)
-    # cv2.waitKey(1)
-
-    # if i > 50:
-    #     break
